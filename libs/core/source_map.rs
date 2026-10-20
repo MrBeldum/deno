@@ -230,8 +230,16 @@ impl SourceMapper {
       return SourceMapApplication::Unchanged;
     };
 
-    let new_line_number = token.get_src_line() + 1;
-    let new_column_number = token.get_src_col() + 1;
+    // A malformed source map can carry a negative cumulative source line or
+    // column, which the `sourcemap` decoder wraps to `u32::MAX`. Converting
+    // the 0-based line and column numbers to 1-based would then overflow, so
+    // leave the location unchanged instead of aborting on such input.
+    let Some(new_line_number) = token.get_src_line().checked_add(1) else {
+      return SourceMapApplication::Unchanged;
+    };
+    let Some(new_column_number) = token.get_src_col().checked_add(1) else {
+      return SourceMapApplication::Unchanged;
+    };
 
     let new_file_name = match token.get_source() {
       Some(source_file_name) => {
@@ -570,5 +578,27 @@ mod tests {
       source_mapper.source_lines.entries.len(),
       MAX_CACHED_SOURCE_LINES
     );
+  }
+
+  #[test]
+  fn test_apply_source_map_out_of_range_src_line_does_not_overflow() {
+    // The mapping "AADA" is [genCol 0, srcIdx 0, srcLine delta -1, srcCol 0],
+    // so the decoded token's `src_line` wraps to `u32::MAX`. Converting the
+    // 0-based line to a 1-based line must not overflow on such malformed input.
+    let mut loader = SourceMapLoader::default();
+    loader.map.insert(
+      Url::parse("file:///a.js").unwrap(),
+      SourceMapLoaderContent {
+        source_map: Some(
+          ascii_str!(
+            r#"{"version":3,"sources":["file:///a.ts"],"names":[],"mappings":"AADA"}"#
+          )
+          .into(),
+        ),
+      },
+    );
+    let mut source_mapper = SourceMapper::new(Rc::new(loader));
+    let application = source_mapper.apply_source_map("file:///a.js", 1, 1);
+    assert_eq!(application, SourceMapApplication::Unchanged);
   }
 }
